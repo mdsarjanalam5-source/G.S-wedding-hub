@@ -1,0 +1,83 @@
+name: Build G.S Wedding Hub APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Extract ZIP and Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Find and extract Android project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -maxdepth 2 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | grep -q .; then
+            SETTINGS=$(find . -maxdepth 2 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
+            PROJECT_DIR=$(dirname "$SETTINGS")
+          else
+            ZIP_FILE=$(find . -maxdepth 3 -type f -iname '*.zip' | head -n 1 || true)
+            if [ -z "$ZIP_FILE" ]; then echo 'ERROR: No Android project ZIP found.'; exit 1; fi
+            mkdir -p "$RUNNER_TEMP/gs-project"
+            unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/gs-project"
+            SETTINGS=$(find "$RUNNER_TEMP/gs-project" -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1 || true)
+            if [ -z "$SETTINGS" ]; then echo 'ERROR: ZIP contains no Gradle settings file.'; exit 1; fi
+            PROJECT_DIR=$(dirname "$SETTINGS")
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+          test -f "$PROJECT_DIR/app/build.gradle"
+
+      - name: Set up Android SDK from runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          SDKMANAGER=$(find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)
+          if [ -z "$SDKMANAGER" ]; then echo 'ERROR: sdkmanager not found on runner'; exit 1; fi
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses || true
+          "$SDKMANAGER" --sdk_root="$SDK" 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        run: gradle --no-daemon -p "$PROJECT_DIR" assembleDebug
+
+      - name: Verify APK
+        run: test -s "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GS-Wedding-Hub-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish APK Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-build-${{ github.run_number }}
+          name: G.S Wedding Hub APK ${{ github.run_number }}
+          prerelease: true
+          files: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
